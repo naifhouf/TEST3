@@ -1,0 +1,16 @@
+aiohttp==3.11.11
+websockets==11.0.0
+websocket-client==1.8.0
+asyncio==4.0.0
+python-dotenv==1.1.1
+tzlocal==5.3.1
+typing-extensions==4.14.1
+rich==14.1.0
+selenium==4.35.0
+webdriver-manager==4.0.2
+psutil==7.0.0
+loguru==0.7.3
+pydantic==2.11.7
+pandas==2.3.2
+fastapi
+uvicorn[standard]
