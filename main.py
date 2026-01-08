@@ -56,7 +56,7 @@ async def startup_event():
                 await asyncio.sleep(5)  # إعادة المحاولة بعد 5 ثواني
     asyncio.create_task(reconnect())
 
-@app.websocket("/ws/candles")
+@app.websocket("/ws/prices")
 async def websocket_endpoint(websocket: WebSocket):
     """التعامل مع اتصالات WebSocket من الواجهة الأمامية"""
     await websocket.accept()
