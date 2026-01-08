@@ -1,61 +1,138 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import asyncio
-from pocketoptionapi_async import AsyncPocketOptionClient
-import logging
 import time
+import logging
+from pocketoptionapi_async import AsyncPocketOptionClient
 
+# ======================
+# LOGGING
+# ======================
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("PO_CANDLES_SERVER")
+
 app = FastAPI()
 
+# ======================
+# POCKET OPTION
+# ======================
 SSID = r'42["auth",{"session":"c6v74skiu8l58ls0k2iesll1fa","isDemo":1,"uid":71923919,"platform":2,"isFastHistory":true}]'
-client = AsyncPocketOptionClient(SSID, is_demo=True)
 
-connections = {}
+client = AsyncPocketOptionClient(
+    SSID=SSID,
+    is_demo=True,
+    enable_logging=False
+)
 
-# تخزين آخر شمعة لكل زوج
-last_candle = {}
+# ======================
+# STATE
+# ======================
+connections = {}   # websocket -> symbol
+candles = {}       # symbol -> current candle
 
+# ======================
+# HELPERS
+# ======================
+def now_minute_ts():
+    return int(time.time() // 60 * 60)
+
+def new_candle(price, ts):
+    return {
+        "t0": ts,
+        "open": price,
+        "high": price,
+        "low": price,
+        "close": price
+    }
+
+# ======================
+# RECEIVE TICKS → BUILD CANDLES
+# ======================
 async def receive_price_data(data):
-    symbol = data.get("symbol")
-    candles = data.get("candles")
+    try:
+        symbol = data.get("symbol")
+        price = data.get("price")
 
-    if not symbol or not candles:
-        return
+        if not symbol or price is None:
+            return
 
-    candle = candles[-1]
-    last_candle[symbol] = candle
+        ts = now_minute_ts()
 
-    # بث الشمعة لكل العملاء
-    for ws, asset in list(connections.items()):
-        if asset == symbol:
+        # init candle
+        if symbol not in candles:
+            candles[symbol] = new_candle(price, ts)
+            return
+
+        candle = candles[symbol]
+
+        # same candle
+        if candle["t0"] == ts:
+            candle["high"] = max(candle["high"], price)
+            candle["low"] = min(candle["low"], price)
+            candle["close"] = price
+            return
+
+        # 🔥 candle closed → SEND
+        payload = {
+            "symbol": symbol,
+            "open": candle["open"],
+            "high": candle["high"],
+            "low": candle["low"],
+            "close": candle["close"],
+            "timestamp": candle["t0"],
+            "is_closed": True
+        }
+
+        remove = []
+        for ws, s in connections.items():
             try:
-                await ws.send_json({
-                    "symbol": symbol,
-                    "open": candle["open"],
-                    "high": candle["high"],
-                    "low": candle["low"],
-                    "close": candle["close"],
-                    "time": candle["time"]
-                })
+                if s == symbol:
+                    await ws.send_json(payload)
             except:
-                connections.pop(ws, None)
+                remove.append(ws)
 
+        for ws in remove:
+            connections.pop(ws, None)
+
+        # start new candle
+        candles[symbol] = new_candle(price, ts)
+
+    except Exception as e:
+        logger.error(f"CANDLE ERROR: {e}")
+
+# ======================
+# STARTUP
+# ======================
 @app.on_event("startup")
 async def startup():
-    await client.connect()
-    client.receive_price_data = receive_price_data
+    async def connect():
+        while True:
+            try:
+                await client.connect()
+                client.receive_price_data = receive_price_data
+                logger.info("✅ Connected to PocketOption")
+                break
+            except Exception as e:
+                logger.error(f"Connect error: {e}")
+                await asyncio.sleep(5)
 
+    asyncio.create_task(connect())
+
+# ======================
+# WEBSOCKET
+# ======================
 @app.websocket("/ws/candles")
 async def ws_candles(ws: WebSocket):
     await ws.accept()
+    logger.info("🔌 WebSocket connected")
+
     try:
         symbol = await ws.receive_text()
         connections[ws] = symbol
 
-        # طلب بث مستمر
-        while True:
-            await client._request_candles2(asset=symbol, timeframe=60)
-            await asyncio.sleep(1)
+        logger.info(f"📡 Subscribed: {symbol}")
 
-    except WebSocketDisconnect:
-        connections.pop(ws, None)
+        asyncio.create_task(
+            client._request_candles2(asset=symbol, timeframe=60)
+        )
+
+        while True:
